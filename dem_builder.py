@@ -1,9 +1,9 @@
+import math
 from collections import defaultdict
 from pathlib import Path
+
 import rasterio
 import rasterio.errors
-import rasterio.warp
-import math
 import requests
 from osgeo import gdal
 
@@ -65,7 +65,9 @@ def main(download_list, dest_dir):
     print(f"Reprojecting rasters to same CRS ({mode_crs})")
     rasters = []
     for downloaded_tif in downloads:
-        reprojected_tif = downloaded_tif.with_stem(f"{downloaded_tif.stem}_{mode_crs}")
+        reprojected_tif = downloaded_tif.with_stem(
+            f"{downloaded_tif.stem}_{str(mode_crs).replace(":", "")}"
+        )
         with rasterio.open(downloaded_tif) as src_raster:
             if src_raster.count != 1:
                 raise ValueError(
@@ -87,17 +89,6 @@ def main(download_list, dest_dir):
                     print(
                         f"=> {downloaded_tif} ({src_raster.crs}) has already been reprojected to {reprojected_tif} ({mode_crs})"
                     )
-                # reprojected, _ = rasterio.warp.reproject(
-                #     rasterio.band(src_raster, 1),
-                #     # rasterio.band(dst_raster, 1),
-                #     dst_crs=mode_crs,
-                # )
-                # print(f"{reprojected=}")
-                # with reprojected_tif.open("rb") as f, rasterio.open(
-                #     f, "w", driver="GTiff"
-                # ) as reprojected_raster:
-                #     reprojected_raster.write(reprojected, 1)
-                #     raster = reprojected_raster
                 raster_tif = reprojected_tif
             else:
                 raster_tif = downloaded_tif
@@ -118,12 +109,12 @@ def main(download_list, dest_dir):
                 if max_y is None or raster.bounds.top > max_y:
                     max_y = raster.bounds.top
     # Construct new VRT
-    vrt = dest_dir / "output.vrt"
+    output_vrt = dest_dir / "output.vrt"
     print(f"Building VRT from {len(rasters)} rasters")
     vrt_dataset = gdal.BuildVRT(
-        str(vrt),
+        str(output_vrt),
         rasters,
-        options=gdal.BuildVRTOptions(resampleAlg="cubic", addAlpha=True),
+        options=gdal.BuildVRTOptions(resampleAlg="cubic"),
     )
 
     # Clip the VRT to the new size
@@ -132,42 +123,28 @@ def main(download_list, dest_dir):
     clipped_width = (original_width // 700) * 700
     original_height = max_y - min_y
     clipped_height = (original_height // 700) * 700
-    center = (min_x + (clipped_width / 2), min_y + (clipped_width / 2))
+    center = (round((min_x + max_x) / 2), round((min_y + max_y) / 2))
 
     print(
         f"{original_width=} {clipped_width=} {original_height=} {clipped_height=} {center=} {min_x=} {min_y=} {max_x=} {max_y=}"
     )
-    clipped_png = Path("clipped.png")
+    clipped_png = dest_dir / "clipped.png"
 
-    print("Clipping VRT and converting to PNG")
-    # options = gdal.TranslateOptions(
-    #     options="__RETURN_OPTION_LIST__",
-    #     format="PNG",
-    #     projWin=(
-    #         center[0] - (clipped_width / 2),
-    #         center[1] + (clipped_height / 2),
-    #         center[0] + (clipped_width / 2),
-    #         center[1] - (clipped_height / 2),
-    #     ),
-    #     scaleParams=[(-12, 500)],
-    #     width=clipped_width / 3.5,
-    #     height=clipped_height / 3.5,
-    #     resampleAlg="cubic",
-    #     outputType=gdal.GDT_UInt16,
-    # )
-    # # print(f"{options=}")
+    print("Clipping VRT, converting to PNG")
     clipped_dataset = gdal.Translate(
         str(clipped_png),
         vrt_dataset,
         options=gdal.TranslateOptions(
             format="PNG",
             projWin=(
-                center[0] - (clipped_width / 2),
-                center[1] + (clipped_height / 2),
-                center[0] + (clipped_width / 2),
-                center[1] - (clipped_height / 2),
+                center[0] - (clipped_width // 2),
+                center[1] + (clipped_height // 2),
+                center[0] + (clipped_width // 2),
+                center[1] - (clipped_height // 2),
             ),
-            scaleParams=[(-12, 500)],
+            scaleParams=[
+                (-12, 500, 0, 65535),
+            ],
             width=clipped_width / 3.5,
             height=clipped_height / 3.5,
             resampleAlg="cubic",
