@@ -1,7 +1,10 @@
+import asyncio
 import math
 from collections import defaultdict
 from pathlib import Path
 
+import aiopath
+import httpx
 import rasterio
 import rasterio.errors
 import requests
@@ -18,25 +21,37 @@ def is_valid_geotiff(file: Path, crs: rasterio.CRS | None = None) -> bool:
         return False
 
 
-def download(urls: list[str], dest_dir: Path) -> list[Path]:
-    c = len(urls)
-    w = math.ceil(math.log(c + 1))
+async def download(url: str, dest_dir: aiopath.AsyncPath):
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url)
+        if response.status_code != 200:
+            raise RuntimeError(f"Failed to download {url}: {response.status_code}")
+        return response.content
+
+
+async def download_all(urls: list[str], dest_dir: Path) -> list[Path]:
+    count = len(urls)
+    _display_width = math.ceil(math.log(count + 1))
     downloaded = []
     for i, url in enumerate(urls):
         dest = dest_dir / url.split("/")[-1]
         downloaded.append(dest)
         if dest.is_file() and is_valid_geotiff(dest):
-            print(f"[{i + 1: {w}}/{c: {w}}] Skipping {dest}, already downloaded")
+            print(
+                f"[{i + 1: {_display_width}}/{count: {_display_width}}] Skipping {dest}, already downloaded"
+            )
             continue
 
-        print(f"[{i + 1: {w}}/{c: {w}}] Downloading from {url}")
+        print(
+            f"[{i + 1: {_display_width}}/{count: {_display_width}}] Downloading from {url}"
+        )
         with requests.get(url, stream=True) as resp:
             if not resp.ok:
                 print(
-                    f"{' ' * (w * 2 + 3)} Failed to download {dest}, {resp.status_code}: {resp.reason}"
+                    f"{' ' * (_display_width * 2 + 3)} Failed to download {dest}, {resp.status_code}: {resp.reason}"
                 )
                 continue
-            print(f"{' ' * (w * 2 + 3)} Saving to {dest}")
+            print(f"{' ' * (_display_width * 2 + 3)} Saving to {dest}")
             with dest.open("wb") as d:
                 for chunk in resp.iter_content(chunk_size=8192):
                     d.write(chunk)
@@ -44,9 +59,16 @@ def download(urls: list[str], dest_dir: Path) -> list[Path]:
     return downloaded
 
 
-def main(download_list, dest_dir):
+async def amain(download_list: Path, dest_dir: aiopath.AsyncPath):
+    download_urls = download_list.read_text().splitlines()
+    async with asyncio.TaskGroup() as tg:
+        for url in download_urls:
+            tg.create_task(download(url, dest_dir))
+
+
+async def main(download_list: Path, dest_dir: Path):
     print("Downloading src rasters")
-    downloads = download(Path(download_list).read_text().splitlines(), dest_dir)
+    downloads = download_all(Path(download_list).read_text().splitlines(), dest_dir)
     crs_count: defaultdict[rasterio.CRS, int] = defaultdict(lambda: 0)
     for downloaded_tif in downloads:
         with rasterio.open(downloaded_tif) as src_raster:
@@ -163,4 +185,4 @@ def main(download_list, dest_dir):
 if __name__ == "__main__":
     import sys
 
-    main(Path(sys.argv[1]), Path(sys.argv[2]))
+    asyncio.run(main(Path(sys.argv[1]), Path(sys.argv[2])))
