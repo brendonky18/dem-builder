@@ -190,6 +190,23 @@ async def main(src: Path, dst: Path, crs: rasterio.CRS, MAX_MEMORY: int = 2 * 10
             await asyncio.sleep(0.2)
 
     # Build a VRT from all the reprojected files
+    reprojected_tifs = [task.result() for task in results]
+
+    mosaic, mosaic_transform = rasterio.merge.merge(
+        reprojected_tifs, dtype="uint16", mem_limit=1 * 1024  # 1 GB limit
+    )
+    with rasterio.open(reprojected_tifs[0]) as src0:
+        kwargs = src0.meta.copy()
+    kwargs["driver"] = "GTiff"
+    kwargs["height"] = mosaic.shape[1]
+    kwargs["width"] = mosaic.shape[2]
+    kwargs["transform"] = mosaic_transform
+    # kwargs["dtype"] = "uint16"
+
+    output_tif = dst / "mosaic.tif"
+    print(f"Writing merged raster to {output_tif}")
+    with rasterio.open(output_tif, "w", **kwargs) as dest:
+        dest.write(mosaic)
 
 
 if __name__ == "__main__":
