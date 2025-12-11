@@ -114,53 +114,35 @@ async def reproject_to_crs(src_tif: Path, dst_crs: rasterio.CRS) -> Path:
         if src_dataset.crs == dst_crs:
             print(f"{src_tif} is already in {dst_crs}, skipping reprojection")
             return src_tif
-
-    # create in-memory file
-    memory_src_file = Path(f"/vsimem/{src_tif.name}")
-    reprojected_file_name = (
-        f"{src_tif.stem}_{str(dst_crs).replace(":", "-")}{src_tif.suffix}"
-    )
-
-    print(f"Opening {src_tif}")
-    src_tif_data = src_tif.read_bytes()
-    with gdal_vsimem_file(memory_src_file, src_tif_data):
-        print(f"{memory_src_file=}")
-
-        # check if the reprojected file already exists
-        memory_dest_file = Path("/vsimem", reprojected_file_name)
-        result = gdal.VSIStatL(str(memory_dest_file), gdal.VSI_STAT_SIZE_FLAG)
-        if result is not None and result.size >= 0:
-            print(f"{memory_src_file} has already been reprojected to {dst_crs}")
-            return memory_dest_file
-
-        # reproject the file
-        args = [memory_src_file, memory_dest_file] + gdal.WarpOptions(
-            dstSRS=dst_crs.to_string(), options="__RETURN_OPTION_LIST__"
+        reprojected_tif = src_tif.parent / (
+            f"{src_tif.stem}_{str(dst_crs).replace(":", "-")}{src_tif.suffix}"
         )
-
-        print(
-            f"Warping {src_tif} from {src_dataset.crs} to {dst_crs} as {memory_dest_file}"
+        transform, width, height = rasterio.warp.calculate_default_transform(
+            src_dataset.crs,
+            dst_crs,
+            src_dataset.width,
+            src_dataset.height,
+            *src_dataset.bounds,
         )
-        reprojected = gdal.Warp(
-            str(memory_dest_file),
-            str(memory_src_file),
-            options=gdal.WarpOptions(
-                dstSRS=dst_crs.to_string(), warpMemoryLimit=1 * 1024**3
-            ),
-        )
-        reprojected = None
-        # proc = await asyncio.create_subprocess_exec(
-        #     "gdalwarp",
-        #     *args,
-        #     stdout=asyncio.subprocess.PIPE,
-        #     stderr=asyncio.subprocess.PIPE,
-        # )
-        # stdout, stderr = await proc.communicate()
+        kwargs = src_dataset.meta.copy()
+        kwargs["crs"] = dst_crs
+        kwargs["transform"] = transform
+        kwargs["width"] = width
+        kwargs["height"] = height
 
-        # if proc.returncode != 0:
-        #     raise RuntimeError(f"gdalwarp failed: {stderr.decode()}")
-
-        return memory_dest_file
+        with rasterio.open(reprojected_tif, "w", **kwargs) as reprojected_dataset:
+            for i in range(1, src_dataset.count + 1):
+                rasterio.warp.reproject(
+                    source=rasterio.band(src_dataset, i),
+                    destination=rasterio.band(reprojected_dataset, i),
+                    src_transform=src_dataset.transform,
+                    src_crs=src_dataset.crs,
+                    dst_transform=transform,
+                    dst_crs=dst_crs,
+                    resampling=rasterio.warp.Resampling.nearest,
+                    warp_mem_limit=1 * 1024**3,
+                )
+        return Path(reprojected_tif)
 
 
 async def main(src: Path, dst: Path, crs: rasterio.CRS, MAX_MEMORY: int = 2 * 1024**3):
