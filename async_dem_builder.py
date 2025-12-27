@@ -8,7 +8,8 @@ import aiofiles
 import httpx
 import rasterio
 import rasterio.errors
-from osgeo import gdal
+import rasterio.merge
+import rasterio.warp
 
 
 def is_valid_geotiff(file: Path, crs: rasterio.CRS | None = None) -> bool:
@@ -79,32 +80,9 @@ async def download(url: str, dest_dir: Path, memory_manager: MemoryManager) -> P
     return dest_path
 
 
-async def get_crs(file: Path) -> rasterio.CRS | None:
-    async with aiofiles.open(file, "rb") as f:
-        content = await f.read()
-    with rasterio.MemoryFile(content) as memfile:
-        with memfile.open() as dataset:
-            return dataset.crs
-
-
-@contextmanager
-def gdal_vsimem_file(file_path: Path, data: bytes):
-    gdal.FileFromMemBuffer(str(file_path), data)
-    result = gdal.VSIStatL(str(file_path), gdal.VSI_STAT_SIZE_FLAG)
-    print(f"{result.size=} {file_path=}")
-
-    try:
-        yield
-    except Exception as e:
-        print(f"Got exception {e!s}")
-        raise
-    finally:
-        print(f"Deleting {file_path} from /vsimem")
-        gdal.Unlink(str(file_path))
-
-
-async def reproject_to_crs(src_tif: Path, dst_crs: rasterio.CRS) -> Path:
-    print(f"Reprojecting {src_tif} to {dst_crs}")
+async def reproject_to_crs(
+    src_tif: Path, dst_crs: rasterio.CRS, mem_limit: int = 0
+) -> Path:
     with rasterio.open(src_tif) as src_dataset:
         if src_dataset.crs == dst_crs:
             print(f"{src_tif} is already in {dst_crs}, skipping reprojection")
@@ -228,9 +206,6 @@ class RateLimiter:
 if __name__ == "__main__":
     import sys
 
-    # gdal.WarpOptions(options=["--version"])
-    # gdal.Warp("", "", options=["--version"])
-    # print(gdal.VersionInfo())
     asyncio.run(
         main(
             Path(sys.argv[1]), Path(sys.argv[2]), rasterio.CRS.from_string(sys.argv[3])
