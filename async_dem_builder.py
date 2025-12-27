@@ -1,7 +1,7 @@
 import asyncio
-from collections import defaultdict
+import time
 from contextlib import asynccontextmanager
-from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import aiofiles
@@ -60,8 +60,6 @@ async def download(url: str, dest_dir: Path, memory_manager: MemoryManager) -> P
         return dest_path
 
     async with httpx.AsyncClient() as client, client.stream("GET", url) as response:
-        # if response.status_code != 200:
-        #     raise RuntimeError(f"Failed to download {url}: {response.status_code}")
         response.raise_for_status()
         print(f"Headers: {response.headers}")
         download_size = int(response.headers["content-length"])
@@ -87,9 +85,11 @@ async def reproject_to_crs(
         if src_dataset.crs == dst_crs:
             print(f"{src_tif} is already in {dst_crs}, skipping reprojection")
             return src_tif
+
         reprojected_tif = src_tif.parent / (
             f"{src_tif.stem}_{str(dst_crs).replace(":", "-")}{src_tif.suffix}"
         )
+
         transform, width, height = rasterio.warp.calculate_default_transform(
             src_dataset.crs,
             dst_crs,
@@ -104,6 +104,7 @@ async def reproject_to_crs(
         kwargs["height"] = height
 
         with rasterio.open(reprojected_tif, "w", **kwargs) as reprojected_dataset:
+            print(f"Reprojecting {src_tif} to {dst_crs}")
             for i in range(1, src_dataset.count + 1):
                 rasterio.warp.reproject(
                     source=rasterio.band(src_dataset, i),
@@ -112,9 +113,11 @@ async def reproject_to_crs(
                     src_crs=src_dataset.crs,
                     dst_transform=transform,
                     dst_crs=dst_crs,
-                    resampling=rasterio.warp.Resampling.nearest,
-                    warp_mem_limit=1 * 1024**3,
+                    resampling=rasterio.warp.Resampling.cubic,
+                    warp_mem_limit=mem_limit // 1024**2,
                 )
+        return reprojected_tif
+
 
 @dataclass
 class RateLimiter:
@@ -143,51 +146,42 @@ class RateLimiter:
         # otherwise, increment the burst count
 
 
-    memory_manager = MemoryManager(MAX_MEMORY)
+async def main(src: Path, dst: Path, crs: rasterio.CRS, mem_limit: int = 2 * 1024**3):
+
+    memory_manager = MemoryManager(mem_limit)
+    limiter = RateLimiter(frequency=5, time=1)
 
     async def download_and_reproject(url: str) -> Path:
         # nonlocal current_memory_usage
         downloaded_file = None
         while downloaded_file is None:
             try:
-                downloaded_file = await download(url, dest_dir, memory_manager)
+                print("waiting for rate limit")
+                await limiter.wait()
+                downloaded_file = await download(url, downloads_dir, memory_manager)
             except Exception as e:
                 print(f"Error downloading {url}: {e!s}. Retrying...")
                 await asyncio.sleep(1)
-        # file_size = downloaded_file.stat().st_size
-        # while current_memory_usage > MAX_MEMORY:
-        #     print(f"waiting: {current_memory_usage=}")
-        #     await memory_usage_below_limit.wait()
-        # current_memory_usage += file_size
-        async with memory_manager.acquire(1 * 1024**3, f"reproject {url}"):
-            reprojected_file = await reproject_to_crs(downloaded_file, crs)
-        # current_memory_usage -= file_size
-        # memory_usage_below_limit.set()
+
+        reprojected_file = await reproject_to_crs(downloaded_file, crs, mem_limit)
         return reprojected_file
 
     # Download all the files
-    src_tifs = []
     async with asyncio.TaskGroup() as tg:
         async with aiofiles.open(src, "r") as src_file:
             urls = [
                 line.strip() for line in (await src_file.readlines()) if line.strip()
             ]
-        dest_dir = dst / "downloads"
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        results = []
-        for url in urls:
-            cur_tif = dest_dir / url.split("/")[-1]
-            src_tifs.append(cur_tif)
-            results.append(tg.create_task(download_and_reproject(url)))
+        downloads_dir = dst / "downloads"
+        downloads_dir.mkdir(parents=True, exist_ok=True)
 
-            # throttle download rate
-            await asyncio.sleep(0.2)
+        results = [tg.create_task(download_and_reproject(url)) for url in urls]
 
     # Build a VRT from all the reprojected files
     reprojected_tifs = [task.result() for task in results]
 
     mosaic, mosaic_transform = rasterio.merge.merge(
-        reprojected_tifs, dtype="uint16", mem_limit=1 * 1024  # 1 GB limit
+        reprojected_tifs, dtype="uint16", mem_limit=mem_limit // 1024**2
     )
     with rasterio.open(reprojected_tifs[0]) as src0:
         kwargs = src0.meta.copy()
@@ -195,7 +189,6 @@ class RateLimiter:
     kwargs["height"] = mosaic.shape[1]
     kwargs["width"] = mosaic.shape[2]
     kwargs["transform"] = mosaic_transform
-    # kwargs["dtype"] = "uint16"
 
     output_tif = dst / "mosaic.tif"
     print(f"Writing merged raster to {output_tif}")
