@@ -137,12 +137,33 @@ async def reproject_to_crs(src_tif: Path, dst_crs: rasterio.CRS) -> Path:
                     resampling=rasterio.warp.Resampling.nearest,
                     warp_mem_limit=1 * 1024**3,
                 )
-        return Path(reprojected_tif)
 
+@dataclass
+class RateLimiter:
+    """Allows at most `frequency` operations every `time` seconds."""
 
-async def main(src: Path, dst: Path, crs: rasterio.CRS, MAX_MEMORY: int = 2 * 1024**3):
-    # current_memory_usage = 0
-    # memory_usage_below_limit = asyncio.Event()
+    time: float
+    frequency: int = 1
+
+    _next_reset: int = 0
+    _burst_count: int = 0
+
+    async def wait(self):
+        if self._burst_count < self.frequency:
+            self._burst_count += 1
+            return
+        else:
+            sleep_time = self._next_reset - time.perf_counter_ns() / 1e9
+            if sleep_time > 0:
+                print(f"Rate limit reached, sleeping for {sleep_time:.2f} seconds")
+                await asyncio.sleep(sleep_time)
+            self._next_reset += int(self.time * 1e9)
+            self._burst_count = 1
+            return
+        # if we have reached the burst limit, wait until the next reset time
+        # and reset the burst count and the next reset time
+        # otherwise, increment the burst count
+
 
     memory_manager = MemoryManager(MAX_MEMORY)
 
