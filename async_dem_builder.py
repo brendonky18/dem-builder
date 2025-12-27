@@ -36,24 +36,19 @@ class MemoryManager(asyncio.Event):
                 f"Waiting for memory for {name}: current memory={self.current_memory/1024**3: 4.2f} GB size={size/1024**2: 4.2f} MB"
             )
             await self.wait()
+            self.clear()
         self.current_memory += size
         print(
             f"Acquired memory for {name}: current memory={self.current_memory/1024**3: 4.2f} GB size={size/1024**2: 4.2f} MB"
         )
-        if self.current_memory > self.max_memory:
-            self.clear()
 
         try:
             yield
         finally:
-            self.release(size, name)
-
-    def release(self, size: int, name: str):
-        self.current_memory -= size
-        print(
-            f"Releasing memory for {name}: current memory={self.current_memory/1024**3: 4.2f} GB size={size/1024**2: 4.2f} MB"
-        )
-        if self.current_memory < self.max_memory:
+            self.current_memory -= size
+            print(
+                f"Releasing memory for {name}: current memory={self.current_memory/1024**3: 4.2f} GB size={size/1024**2: 4.2f} MB"
+            )
             self.set()
 
 
