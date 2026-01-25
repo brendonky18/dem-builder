@@ -181,7 +181,7 @@ async def main(src: Path, dst: Path, crs: rasterio.CRS, mem_limit: int = 2 * 102
     reprojected_tifs = [task.result() for task in results]
 
     mosaic, mosaic_transform = rasterio.merge.merge(
-        reprojected_tifs, dtype="uint16", mem_limit=mem_limit // 1024**2
+        reprojected_tifs, mem_limit=mem_limit // 1024**2
     )
     with rasterio.open(reprojected_tifs[0]) as src0:
         kwargs = src0.meta.copy()
