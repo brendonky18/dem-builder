@@ -190,7 +190,7 @@ async def main(src: Path, dst: Path, crs: rasterio.CRS, mem_limit: int = 2 * 102
     kwargs["width"] = mosaic.shape[2]
     kwargs["transform"] = mosaic_transform
 
-    output_tif = dst / "mosaic.tif"
+    output_tif = dst / "output.tif"
     print(f"Writing merged raster to {output_tif}")
     with rasterio.open(output_tif, "w", **kwargs) as dest:
         dest.write(mosaic)
