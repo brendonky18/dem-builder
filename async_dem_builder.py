@@ -89,6 +89,9 @@ async def reproject_to_crs(
         reprojected_tif = src_tif.parent / (
             f"{src_tif.stem}_{str(dst_crs).replace(":", "-")}{src_tif.suffix}"
         )
+        if reprojected_tif.is_file() and is_valid_geotiff(reprojected_tif, dst_crs):
+            print(f"Skipping reprojection for {src_tif}, already reprojected")
+            return reprojected_tif
 
         transform, width, height = rasterio.warp.calculate_default_transform(
             src_dataset.crs,
