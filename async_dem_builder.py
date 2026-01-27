@@ -6,6 +6,7 @@ from pathlib import Path
 
 import aiofiles
 import httpx
+import numpy as np
 import rasterio
 import rasterio.errors
 import rasterio.merge
@@ -90,9 +91,9 @@ async def reproject_to_crs(
             print(f"{src_tif} is already in {dst_crs}, skipping reprojection")
             return src_tif
 
-        reprojected_tif = src_tif.parent / (
-            f"{src_tif.stem}_{str(dst_crs).replace(":", "-")}{src_tif.suffix}"
-        )
+        dest_dir = src_tif.parent.parent / str(dst_crs).replace(":", "-")
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        reprojected_tif = dest_dir / (src_tif.name)
         if reprojected_tif.is_file() and is_valid_geotiff(reprojected_tif, dst_crs):
             print(f"Skipping reprojection for {src_tif}, already reprojected")
             return reprojected_tif
@@ -126,6 +127,45 @@ async def reproject_to_crs(
         return reprojected_tif
 
 
+def convert_data_types(
+    src_tif: Path, min_elevation: int = 0, max_elevation: int = 4096
+) -> Path:
+    dest_dir = src_tif.parent.parent / "converted"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_tif = dest_dir / src_tif.name
+    elevation_range = max_elevation - min_elevation
+    if dest_tif.is_file():
+        with rasterio.open(dest_tif) as dest:
+            if dest.meta["dtype"] == "uint16":
+                print(f"Skipping conversion for {src_tif}, already converted")
+                return dest_tif
+
+    with rasterio.open(src_tif, "r") as src:
+        src_data = src.read()
+        src_meta: dict = src.meta.copy()
+    print(src_meta)
+    src_meta.update(dtype=rasterio.uint16, driver="GTiff", nodata=0)
+    print("Handling no data values...")
+    # convert array to png
+    src_data[src_data == src.nodata] = np.nan
+    # remap the elevation values to the specified range
+    print("Adjusting floor...")
+    src_data -= min_elevation
+    print("Rescaling...")
+    src_data *= 65535 / elevation_range
+    print("Clipping values...")
+    src_data = np.clip(src_data, 0, 65535)
+    print("Handling NaN values...")
+    np.nan_to_num(src_data, copy=False, nan=0)
+    print("Converting data type...")
+    src_data = src_data.astype(np.uint16)
+    with rasterio.open(dest_tif, "w", **src_meta) as dest:
+        dest.write(src_data)
+        print(dest.meta)
+
+    return dest_tif
+
+
 @dataclass
 class RateLimiter:
     """Allows at most `frequency` operations every `time` seconds."""
@@ -153,7 +193,23 @@ class RateLimiter:
         # otherwise, increment the burst count
 
 
-async def main(src: Path, dst: Path, crs: rasterio.CRS, mem_limit: int = 2 * 1024**3):
+async def main(
+    src: Path,
+    dst: Path,
+    crs: rasterio.CRS,
+    mem_limit: int = 1 * 1024**3,
+    elevation_min: int = 0,
+    elevation_max: int = 4096,
+):
+    elevation_range = elevation_max - elevation_min
+    if elevation_range <= 0:
+        raise ValueError(
+            f"Minimum elevation {elevation_min} is not less than maximum elevation {elevation_max}"
+        )
+    elif elevation_range > 65536:
+        raise ValueError(
+            f"Elevation range {elevation_range} is too large to fit in a 16-bit PNG"
+        )
 
     memory_manager = MemoryManager(mem_limit)
     limiter = RateLimiter(frequency=5, time=1)
@@ -163,7 +219,6 @@ async def main(src: Path, dst: Path, crs: rasterio.CRS, mem_limit: int = 2 * 102
         downloaded_file = None
         while downloaded_file is None:
             try:
-                print("waiting for rate limit")
                 await limiter.wait()
                 downloaded_file = await download(url, downloads_dir, memory_manager)
             except Exception as e:
@@ -186,20 +241,21 @@ async def main(src: Path, dst: Path, crs: rasterio.CRS, mem_limit: int = 2 * 102
 
     # Build a VRT from all the reprojected files
     reprojected_tifs = [task.result() for task in results]
-
-    mosaic, mosaic_transform = rasterio.merge.merge(
-        reprojected_tifs, mem_limit=mem_limit // 1024**2
-    )
-    with rasterio.open(reprojected_tifs[0]) as src0:
+    converted_tifs = [
+        convert_data_types(tif, elevation_min, elevation_max)
+        for tif in reprojected_tifs
+    ]
+    print(f"Merging {len(converted_tifs)} rasters...")
+    mosaic, mosaic_transform = rasterio.merge.merge(converted_tifs)
+    with rasterio.open(converted_tifs[0]) as src0:
         kwargs = src0.meta.copy()
-    kwargs["driver"] = "GTiff"
     kwargs["height"] = mosaic.shape[1]
     kwargs["width"] = mosaic.shape[2]
     kwargs["transform"] = mosaic_transform
 
-    output_tif = dst / "output.tif"
-    print(f"Writing merged raster to {output_tif}")
-    with rasterio.open(output_tif, "w", **kwargs) as dest:
+    output_png = dst / "output.png"
+    print(f"Saving to {output_png}...")
+    with rasterio.open(output_png, "w", **kwargs) as dest:
         dest.write(mosaic)
 
 
