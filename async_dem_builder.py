@@ -31,6 +31,10 @@ class MemoryManager(asyncio.Event):
 
     @asynccontextmanager
     async def acquire(self, size: int, name: str):
+        if size > self.max_memory:
+            raise ValueError(
+                f"Requested memory size {size/1024**2:4.2f} MB exceeds maximum memory {self.max_memory/1024**3:4.2f} GB"
+            )
         print(f"current memory={self.current_memory/1024**3:4.2f} {self.is_set()=}")
         while self.current_memory + size > self.max_memory:
             print(
