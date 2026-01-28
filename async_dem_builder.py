@@ -197,6 +197,7 @@ async def main(
     src: Path,
     dst: Path,
     crs: rasterio.CRS,
+    output: Path,
     mem_limit: int = 1 * 1024**3,
     elevation_min: int = 0,
     elevation_max: int = 4096,
@@ -253,17 +254,55 @@ async def main(
     kwargs["width"] = mosaic.shape[2]
     kwargs["transform"] = mosaic_transform
 
-    output_png = dst / "output.png"
-    print(f"Saving to {output_png}...")
-    with rasterio.open(output_png, "w", **kwargs) as dest:
+    print(f"Saving to {output}...")
+    with rasterio.open(output, "w", **kwargs) as dest:
         dest.write(mosaic)
 
 
 if __name__ == "__main__":
-    import sys
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("src", type=Path, help="Path to the source file with URLs")
+    parser.add_argument("dst", type=Path, help="Path to the destination directory")
+    parser.add_argument(
+        "crs", type=rasterio.CRS.from_string, help="Target CRS in EPSG format"
+    )
+    parser.add_argument(
+        "-o", "--output", type=Path, help="Output file path", default=Path("output.png")
+    )
+    parser.add_argument(
+        "-l",
+        "--mem-limit",
+        type=float,
+        help="Memory limit in bytes (default: 1 GB)",
+        default=1,
+    )
+    parser.add_argument(
+        "-m",
+        "--elevation-min",
+        type=int,
+        help="Minimum elevation value (default: 0)",
+        default=0,
+    )
+    parser.add_argument(
+        "-M",
+        "--elevation-max",
+        type=int,
+        help="Maximum elevation value (default: 4096)",
+        default=4096,
+    )
+
+    args = parser.parse_args()
 
     asyncio.run(
         main(
-            Path(sys.argv[1]), Path(sys.argv[2]), rasterio.CRS.from_string(sys.argv[3])
+            args.src,
+            args.dst,
+            args.crs,
+            output=args.output,
+            mem_limit=args.mem_limit * 1024**3,
+            elevation_min=args.elevation_min,
+            elevation_max=args.elevation_max,
         )
     )
