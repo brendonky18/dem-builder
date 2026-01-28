@@ -145,14 +145,18 @@ def convert_data_types(
     return dest_tif
 
 
+type seconds = float
+type nanoseconds = int
+
+
 @dataclass
 class RateLimiter:
     """Allows at most `frequency` operations every `time` seconds."""
 
-    time: float
+    time: seconds
     frequency: int = 1
 
-    _next_reset: int = 0
+    _next_reset: nanoseconds = 0
     _burst_count: int = 0
 
     async def wait(self):
@@ -160,7 +164,7 @@ class RateLimiter:
             self._burst_count += 1
             return
         else:
-            sleep_time = self._next_reset - time.perf_counter_ns() / 1e9
+            sleep_time = (self._next_reset - time.perf_counter_ns()) / 1e9
             if sleep_time > 0:
                 print(f"Rate limit reached, sleeping for {sleep_time:.2f} seconds")
                 await asyncio.sleep(sleep_time)
