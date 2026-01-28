@@ -36,25 +36,15 @@ class MemoryManager(asyncio.Event):
             raise ValueError(
                 f"Requested memory size {size/1024**2:4.2f} MB exceeds maximum memory {self.max_memory/1024**3:4.2f} GB"
             )
-        print(f"current memory={self.current_memory/1024**3:4.2f} {self.is_set()=}")
         while self.current_memory + size > self.max_memory:
-            print(
-                f"Waiting for memory for {name}: current memory={self.current_memory/1024**3: 4.2f} GB size={size/1024**2: 4.2f} MB"
-            )
             await self.wait()
             self.clear()
         self.current_memory += size
-        print(
-            f"Acquired memory for {name}: current memory={self.current_memory/1024**3: 4.2f} GB size={size/1024**2: 4.2f} MB"
-        )
 
         try:
             yield
         finally:
             self.current_memory -= size
-            print(
-                f"Releasing memory for {name}: current memory={self.current_memory/1024**3: 4.2f} GB size={size/1024**2: 4.2f} MB"
-            )
             self.set()
 
 
@@ -66,11 +56,8 @@ async def download(url: str, dest_dir: Path, memory_manager: MemoryManager) -> P
 
     async with httpx.AsyncClient() as client, client.stream("GET", url) as response:
         response.raise_for_status()
-        print(f"Headers: {response.headers}")
         download_size = int(response.headers["content-length"])
-        print(f"{download_size=}")
         encoding = response.headers.get("Content-Encoding")
-        print(f"{encoding=}")
         async with memory_manager.acquire(download_size, f"download {url}"):
             print(f"Downloading {url}")
             # contents = await response.aread()
@@ -143,25 +130,17 @@ def convert_data_types(
     with rasterio.open(src_tif, "r") as src:
         src_data = src.read()
         src_meta: dict = src.meta.copy()
-    print(src_meta)
     src_meta.update(dtype=rasterio.uint16, driver="GTiff", nodata=0)
-    print("Handling no data values...")
     # convert array to png
     src_data[src_data == src.nodata] = np.nan
     # remap the elevation values to the specified range
-    print("Adjusting floor...")
     src_data -= min_elevation
-    print("Rescaling...")
     src_data *= 65535 / elevation_range
-    print("Clipping values...")
     src_data = np.clip(src_data, 0, 65535)
-    print("Handling NaN values...")
     np.nan_to_num(src_data, copy=False, nan=0)
-    print("Converting data type...")
     src_data = src_data.astype(np.uint16)
     with rasterio.open(dest_tif, "w", **src_meta) as dest:
         dest.write(src_data)
-        print(dest.meta)
 
     return dest_tif
 
