@@ -642,7 +642,7 @@ async def main(
     dst: Path,
     crs: rasterio.CRS,
     output: Path,
-    mem_limit: int = 1 * 1024**3,
+    mem_limit: int = 500 * 1024**2,
     elevation_min: int = 0,
     elevation_max: int = 4096,
 ):
@@ -656,7 +656,7 @@ async def main(
             f"Elevation range {elevation_range} is too large to fit in a 16-bit PNG"
         )
 
-    memory_manager = MemoryManager(mem_limit)
+    memory_manager = MemoryManager(int(mem_limit * 1e6))
     limiter = RateLimiter(frequency=5, time=1)
 
     async def download_and_reproject(url: str) -> Path:
@@ -731,8 +731,8 @@ if __name__ == "__main__":
         "-l",
         "--mem-limit",
         type=float,
-        help="Memory limit in bytes (default: 1 GB)",
-        default=1,
+        help="Memory limit in MB (default: 500 MB)",
+        default=500,
     )
     parser.add_argument(
         "-m",
@@ -757,7 +757,7 @@ if __name__ == "__main__":
             args.dst,
             args.crs,
             output=args.output,
-            mem_limit=args.mem_limit * 1024**3,
+            mem_limit=args.mem_limit,
             elevation_min=args.elevation_min,
             elevation_max=args.elevation_max,
         )
