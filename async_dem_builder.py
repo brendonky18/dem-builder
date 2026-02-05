@@ -531,6 +531,9 @@ async def download(url: str, dest_dir: Path, memory_manager: MemoryManager) -> P
 async def reproject_to_crs(
     src_tif: Path, dst_crs: rasterio.CRS, mem_limit: int = 0
 ) -> Path:
+    if not is_valid_geotiff(src_tif):
+        raise ValueError(f"Source file {src_tif} is not a valid GeoTIFF")
+
     with rasterio.open(src_tif) as src_dataset:
         if src_dataset.crs == dst_crs:
             print(f"{src_tif} is already in {dst_crs}, skipping reprojection")
@@ -658,17 +661,29 @@ async def main(
 
     async def download_and_reproject(url: str) -> Path:
         # nonlocal current_memory_usage
-        downloaded_file = None
-        while downloaded_file is None:
+        reprojected_file = None
+        for _ in range(5):
             try:
                 await limiter.wait()
                 downloaded_file = await download(url, downloads_dir, memory_manager)
             except Exception as e:
-                print(f"Error downloading {url}: {e!s}. Retrying...")
+                logger.warning(f"Error downloading {url}: {e!r}. Retrying...")
                 await asyncio.sleep(1)
+                continue
+            try:
+                reprojected_file = await reproject_to_crs(
+                    downloaded_file, crs, mem_limit
+                )
+            except Exception as e:
+                downloaded_file.unlink(missing_ok=True)
+                logger.warning(
+                    f"Error reprojecting {downloaded_file}: {e!r}. Retrying..."
+                )
+            if reprojected_file is not None:
+                download_bar.next()
+                return reprojected_file
 
-        reprojected_file = await reproject_to_crs(downloaded_file, crs, mem_limit)
-        return reprojected_file
+        raise RuntimeError(f"Failed to download and reproject {url} after 5 attempts")
 
     # Download all the files
     async with asyncio.TaskGroup() as tg:
