@@ -321,7 +321,6 @@ def merge_with_progress(
         # When dataset output is selected, we might need to create one
         # and will also provide the option of merging by chunks.
         dout_window = windows.Window(0, 0, output_width, output_height)
-        print(f"{dst_path=}")
         if dst_path is not None:
             if isinstance(dst_path, DatasetWriter):
                 dst = dst_path
@@ -339,7 +338,6 @@ def merge_with_progress(
                 exit_stack.enter_context(dst)
 
             max_pixels = mem_limit * 1.0e6 / (np.dtype(dt).itemsize * output_count)
-            print(f"{max_pixels=} {output_width=} {output_height=}")
 
             if output_width * output_height < max_pixels:
                 chunks = [dout_window]
@@ -348,8 +346,6 @@ def merge_with_progress(
                 chunks = subdivide(dout_window, n, n)
         else:
             chunks = [dout_window]
-
-        print(f"{len(chunks)=}")
 
         def _intersect_bounds(bounds1, bounds2, transform):
             """Based on gdal_merge.py."""
@@ -509,7 +505,7 @@ class MemoryManager(asyncio.Event):
 async def download(url: str, dest_dir: Path, memory_manager: MemoryManager) -> Path:
     dest_path = dest_dir / url.split("/")[-1]
     if dest_path.is_file() and is_valid_geotiff(dest_path):
-        print(f"Skipping {url}, already downloaded")
+        logger.info(f"Skipping {url}, already downloaded")
         return dest_path
 
     async with httpx.AsyncClient() as client, client.stream("GET", url) as response:
@@ -517,14 +513,14 @@ async def download(url: str, dest_dir: Path, memory_manager: MemoryManager) -> P
         download_size = int(response.headers["content-length"])
         encoding = response.headers.get("Content-Encoding")
         async with memory_manager.acquire(download_size, f"download {url}"):
-            print(f"Downloading {url}")
+            logger.info(f"Downloading {url}")
             # contents = await response.aread()
             async with aiofiles.open(dest_path, "ab") as f:
                 async for chunk in response.aiter_bytes():
                     await f.write(chunk)
             # async with aiofiles.open(dest_path, "wb") as f:
             # await f.write(contents)
-            print(f"Saved {url} to {dest_path}")
+            logger.info(f"Saved {url} to {dest_path}")
     return dest_path
 
 
@@ -536,14 +532,14 @@ async def reproject_to_crs(
 
     with rasterio.open(src_tif) as src_dataset:
         if src_dataset.crs == dst_crs:
-            print(f"{src_tif} is already in {dst_crs}, skipping reprojection")
+            logger.info(f"{src_tif} is already in {dst_crs}, skipping reprojection")
             return src_tif
 
         dest_dir = src_tif.parent.parent / str(dst_crs).replace(":", "-")
         dest_dir.mkdir(parents=True, exist_ok=True)
         reprojected_tif = dest_dir / (src_tif.name)
         if reprojected_tif.is_file() and is_valid_geotiff(reprojected_tif, dst_crs):
-            print(f"Skipping reprojection for {src_tif}, already reprojected")
+            logger.info(f"Skipping reprojection for {src_tif}, already reprojected")
             return reprojected_tif
 
         transform, width, height = rasterio.warp.calculate_default_transform(
@@ -560,18 +556,22 @@ async def reproject_to_crs(
         kwargs["height"] = height
 
         with rasterio.open(reprojected_tif, "w", **kwargs) as reprojected_dataset:
-            print(f"Reprojecting {src_tif} to {dst_crs}")
+            logger.info(f"Reprojecting {src_tif} from {src_dataset.crs} to {dst_crs}")
             for i in range(1, src_dataset.count + 1):
-                rasterio.warp.reproject(
-                    source=rasterio.band(src_dataset, i),
-                    destination=rasterio.band(reprojected_dataset, i),
-                    src_transform=src_dataset.transform,
-                    src_crs=src_dataset.crs,
-                    dst_transform=transform,
-                    dst_crs=dst_crs,
-                    resampling=rasterio.warp.Resampling.cubic,
-                    warp_mem_limit=mem_limit // 1024**2,
-                )
+                try:
+                    rasterio.warp.reproject(
+                        source=rasterio.band(src_dataset, i),
+                        destination=rasterio.band(reprojected_dataset, i),
+                        src_transform=src_dataset.transform,
+                        src_crs=src_dataset.crs,
+                        dst_transform=transform,
+                        dst_crs=dst_crs,
+                        resampling=rasterio.warp.Resampling.cubic,
+                        warp_mem_limit=mem_limit // 1024**2,
+                    )
+                except rasterio.errors.RasterioError as e:
+                    e.add_note(f"Error reprojecting band {i} of {src_tif}")
+                    raise
         return reprojected_tif
 
 
@@ -585,7 +585,7 @@ def convert_data_types(
     if dest_tif.is_file():
         with rasterio.open(dest_tif) as dest:
             if dest.meta["dtype"] == "uint16":
-                print(f"Skipping conversion for {src_tif}, already converted")
+                logger.info(f"Skipping conversion for {src_tif}, already converted")
                 return dest_tif
 
     with rasterio.open(src_tif, "r") as src:
@@ -627,7 +627,9 @@ class RateLimiter:
         else:
             sleep_time = (self._next_reset - time.perf_counter_ns()) / 1e9
             if sleep_time > 0:
-                print(f"Rate limit reached, sleeping for {sleep_time:.2f} seconds")
+                logger.info(
+                    f"Rate limit reached, sleeping for {sleep_time:.2f} seconds"
+                )
                 await asyncio.sleep(sleep_time)
             self._next_reset += int(self.time * 1e9)
             self._burst_count = 1
@@ -711,7 +713,7 @@ async def main(
         dst_path=output,
         mem_limit=mem_limit,
     )
-    print(f"Saved merged output to {output}")
+    logger.info(f"Saved merged output to {output}")
 
 
 if __name__ == "__main__":
@@ -750,6 +752,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # TODO: add option to clip an image to a bounding box
+    # TODO: don't transform if the image is already in the target CRS,
+    # this just wastes time and uses more storage space
     asyncio.run(
         main(
             args.src,
