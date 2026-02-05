@@ -20,8 +20,8 @@ import rasterio.errors
 import rasterio.io
 import rasterio.merge
 import rasterio.warp
+import tqdm
 from affine import Affine
-from progress.bar import Bar
 from rasterio import windows
 from rasterio.enums import Resampling
 from rasterio.errors import MergeError
@@ -661,7 +661,10 @@ async def main(
     memory_manager = MemoryManager(int(mem_limit * 1e6))
     limiter = RateLimiter(frequency=5, time=1)
 
-    download_bar = Bar("Downloading", max=5)
+    async with aiofiles.open(src, "r") as src_file:
+        urls = [line.strip() for line in (await src_file.readlines()) if line.strip()]
+
+    download_bar = tqdm.tqdm(desc="Downloading", total=len(urls))
 
     async def download_and_reproject(url: str) -> Path:
         # nonlocal current_memory_usage
@@ -684,30 +687,24 @@ async def main(
                     f"Error reprojecting {downloaded_file}: {e!r}. Retrying..."
                 )
             if reprojected_file is not None:
-                download_bar.next()
+                download_bar.update()
                 return reprojected_file
 
         raise RuntimeError(f"Failed to download and reproject {url} after 5 attempts")
 
     # Download all the files
-    async with asyncio.TaskGroup() as tg:
-        async with aiofiles.open(src, "r") as src_file:
-            urls = [
-                line.strip() for line in (await src_file.readlines()) if line.strip()
-            ]
-        download_bar.max = len(urls)
-        downloads_dir = dst / "downloads"
-        downloads_dir.mkdir(parents=True, exist_ok=True)
-        with download_bar:
+    with download_bar:
+        async with asyncio.TaskGroup() as tg:
+            downloads_dir = dst / "downloads"
+            downloads_dir.mkdir(parents=True, exist_ok=True)
             results = [tg.create_task(download_and_reproject(url)) for url in urls]
 
-    # Build a VRT from all the reprojected files
-    reprojected_tifs = [task.result() for task in results]
-    with Bar("Converting", max=len(reprojected_tifs)) as convert_bar:
-        converted_tifs = [
-            convert_data_types(tif, elevation_min, elevation_max)
-            for tif in convert_bar.iter(reprojected_tifs)
-        ]
+        # Build a VRT from all the reprojected files
+        reprojected_tifs = [task.result() for task in results]
+    converted_tifs = [
+        convert_data_types(tif, elevation_min, elevation_max)
+        for tif in tqdm.tqdm(reprojected_tifs, desc="Converting")
+    ]
     merge_with_progress(
         converted_tifs,
         dst_path=output,
