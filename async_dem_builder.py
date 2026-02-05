@@ -469,11 +469,16 @@ def merge_with_progress(
 def is_valid_geotiff(file: Path, crs: rasterio.CRS | None = None) -> bool:
     try:
         with rasterio.open(file) as r:
-            if crs is not None:
-                return r.crs == crs
-            return True
-    except rasterio.errors.RasterioError:
+            if crs is not None and r.crs != crs:
+                return False
+            for i in r.indexes:
+                r.checksum(i)
+    except rasterio.errors.RasterioError as e:
+        logger.warning(f"Error validating {file}: {e}")
         return False
+    else:
+        logger.debug(f"Successfully validated {file}")
+        return True
 
 
 class MemoryManager(asyncio.Event):
