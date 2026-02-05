@@ -659,6 +659,8 @@ async def main(
     memory_manager = MemoryManager(int(mem_limit * 1e6))
     limiter = RateLimiter(frequency=5, time=1)
 
+    download_bar = Bar("Downloading", max=5)
+
     async def download_and_reproject(url: str) -> Path:
         # nonlocal current_memory_usage
         reprojected_file = None
@@ -691,28 +693,25 @@ async def main(
             urls = [
                 line.strip() for line in (await src_file.readlines()) if line.strip()
             ]
+        download_bar.max = len(urls)
         downloads_dir = dst / "downloads"
         downloads_dir.mkdir(parents=True, exist_ok=True)
-
-        results = [tg.create_task(download_and_reproject(url)) for url in urls]
+        with download_bar:
+            results = [tg.create_task(download_and_reproject(url)) for url in urls]
 
     # Build a VRT from all the reprojected files
     reprojected_tifs = [task.result() for task in results]
-    converted_tifs = [
-        convert_data_types(tif, elevation_min, elevation_max)
-        for tif in reprojected_tifs
-    ]
-    print(f"Merging {len(converted_tifs)} rasters...")
-    mosaic, mosaic_transform = rasterio.merge.merge(converted_tifs)
-    with rasterio.open(converted_tifs[0]) as src0:
-        kwargs = src0.meta.copy()
-    kwargs["height"] = mosaic.shape[1]
-    kwargs["width"] = mosaic.shape[2]
-    kwargs["transform"] = mosaic_transform
-
-    print(f"Saving to {output}...")
-    with rasterio.open(output, "w", **kwargs) as dest:
-        dest.write(mosaic)
+    with Bar("Converting", max=len(reprojected_tifs)) as convert_bar:
+        converted_tifs = [
+            convert_data_types(tif, elevation_min, elevation_max)
+            for tif in convert_bar.iter(reprojected_tifs)
+        ]
+    merge_with_progress(
+        converted_tifs,
+        dst_path=output,
+        mem_limit=mem_limit,
+    )
+    print(f"Saved merged output to {output}")
 
 
 if __name__ == "__main__":
