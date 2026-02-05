@@ -749,9 +749,17 @@ if __name__ == "__main__":
         help="Maximum elevation value (default: 4096)",
         default=4096,
     )
+    parser.add_argument(
+        "-v", "--verbose", action="count", help="Set the logging verbosity", default=0
+    )
 
     args = parser.parse_args()
 
+    logger.setLevel(logging.WARNING - args.verbose * 10)
+
+    # TODO: add logging config
+    # TODO: use tqdm for progress bars
+    # TODO: add handler for logging output to write with tqdm.write
     # TODO: add option to clip an image to a bounding box
     # TODO: don't transform if the image is already in the target CRS,
     # this just wastes time and uses more storage space
