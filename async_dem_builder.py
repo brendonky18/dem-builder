@@ -1,9 +1,11 @@
 import asyncio
 import cmath
 import logging
+import logging.config
 import math
 import numbers
 import os
+import sys
 import time
 import warnings
 from contextlib import ExitStack
@@ -17,7 +19,6 @@ import httpx
 import numpy as np
 import rasterio
 import rasterio.errors
-import rasterio.io
 import rasterio.merge
 import rasterio.warp
 import tqdm
@@ -415,9 +416,6 @@ def merge_with_progress(
                             sw = windows.from_bounds(*ibounds, src.transform)
                             cw = windows.from_bounds(*ibounds, chunk_transform)
                         except (ValueError, WindowError):
-                            logger.info(
-                                "Skipping source: src=%r, bounds=%r", src, src.bounds
-                            )
                             continue
 
                         cw = win_align(cw)
@@ -671,13 +669,12 @@ async def main(
     async def download_and_reproject(url: str) -> Path:
         # nonlocal current_memory_usage
         reprojected_file = None
-        for _ in range(5):
+        for i in range(5):
             try:
                 await limiter.wait()
                 downloaded_file = await download(url, downloads_dir, memory_manager)
             except Exception as e:
-                logger.warning(f"Error downloading {url}: {e!r}. Retrying...")
-                await asyncio.sleep(1)
+                logger.warning(f"Error downloading {url}: {e!r}. Retrying ({i+1}/5)...")
                 continue
             try:
                 reprojected_file = await reproject_to_crs(
@@ -686,7 +683,7 @@ async def main(
             except Exception as e:
                 downloaded_file.unlink(missing_ok=True)
                 logger.warning(
-                    f"Error reprojecting {downloaded_file}: {e!r}. Retrying..."
+                    f"Error reprojecting {downloaded_file}: {e!r}. Retrying ({i+1}/5)..."
                 )
             if reprojected_file is not None:
                 download_bar.update()
@@ -752,16 +749,68 @@ if __name__ == "__main__":
         "-v", "--verbose", action="count", help="Set the logging verbosity", default=0
     )
 
+    class TQDMHandler(logging.Handler):
+        def emit(self, record):
+            if record.name != "__main__":
+                return
+
+            symbol_map = {
+                logging.DEBUG: "~",
+                logging.INFO: "+",
+                logging.WARNING: "!",
+                logging.ERROR: "x",
+                logging.CRITICAL: "x",
+            }
+            record.symbol = symbol_map[record.levelno]
+            if record.levelno >= logging.WARNING:
+                file = sys.stderr
+            else:
+                file = sys.stdout
+            try:
+                msg = self.format(record)
+                tqdm.tqdm.write(msg, file=file)
+                self.flush()
+            except Exception:
+                self.handleError(record)
+
     args = parser.parse_args()
 
-    logger.setLevel(logging.WARNING - args.verbose * 10)
+    logging.config.dictConfig(
+        {
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "log_file": {
+                    "format": "[%(levelname)s|%(name)s:L%(lineno)d] %(message)s",
+                },
+                "simple": {
+                    "format": "[%(symbol)s] %(message)s",
+                },
+            },
+            "handlers": {
+                "tqdm": {
+                    "()": TQDMHandler,
+                    "formatter": "simple",
+                    "level": logging.WARNING - args.verbose * 10,
+                },
+                "file": {
+                    "class": "logging.FileHandler",
+                    "filename": "dem_builder.log",
+                    "mode": "w",
+                    "formatter": "log_file",
+                    "level": logging.DEBUG,
+                },
+            },
+            "loggers": {
+                "root": {
+                    "handlers": ["tqdm", "file"],
+                    "level": 0,
+                    "propagate": False,
+                }
+            },
+        }
+    )
 
-    # TODO: add logging config
-    # TODO: use tqdm for progress bars
-    # TODO: add handler for logging output to write with tqdm.write
-    # TODO: add option to clip an image to a bounding box
-    # TODO: don't transform if the image is already in the target CRS,
-    # this just wastes time and uses more storage space
     asyncio.run(
         main(
             args.src,
