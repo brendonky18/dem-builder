@@ -369,7 +369,9 @@ def merge_with_progress(
 
             return int_w, int_s, int_e, int_n
 
-        with Bar("Merging", max=len(chunks) * len(sources)) as merge_progress:
+        with tqdm.tqdm(
+            desc="Merging", total=len(chunks) * len(sources)
+        ) as merge_progress:
             for chunk in chunks:
                 dst_w, dst_s, dst_e, dst_n = windows.bounds(chunk, output_transform)
                 dest = np.zeros((output_count, chunk.height, chunk.width), dtype=dt)
@@ -399,7 +401,7 @@ def merge_with_progress(
                     return windows.Window(col_off, row_off, width, height)
 
                 for idx, dataset in enumerate(sources):
-                    merge_progress.next()
+                    merge_progress.update()
                     with dataset_opener(dataset) as src:
 
                         # Intersect source bounds and tile bounds
