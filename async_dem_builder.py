@@ -568,6 +568,8 @@ class retry:
             return wrapper
 
 
+@retry(5)
+async def download(url: str, dest: Path, memory_manager: MemoryManager) -> Path:
     async with httpx.AsyncClient() as client, client.stream("GET", url) as response:
         response.raise_for_status()
         download_size = int(response.headers["content-length"])
@@ -575,20 +577,24 @@ class retry:
         async with memory_manager.acquire(download_size, f"download {url}"):
             logger.info(f"Downloading {url}")
             # contents = await response.aread()
-            async with aiofiles.open(dest_path, "ab") as f:
+            if dest.is_file():
+                logger.debug(f"Deleting existing file {dest}")
+                dest.unlink()
+            async with aiofiles.open(dest, "ab") as f:
                 async for chunk in response.aiter_bytes():
                     await f.write(chunk)
-            # async with aiofiles.open(dest_path, "wb") as f:
-            # await f.write(contents)
-            logger.info(f"Saved {url} to {dest_path}")
-    return dest_path
+    if not dest.stat().st_size == download_size:
+        raise RuntimeError(
+            f"Downloaded file size {dest.stat().st_size / 1024**2:.2f} MB does not match expected size {download_size / 1024**2:.2f} MB for {url}"
+        )
+    elif not is_valid_geotiff(dest):
+        raise RuntimeError(f"Downloaded file {dest} is not a valid GeoTIFF")
+    logger.info(f"Saved {url} to {dest}")
+    return dest
 
 
-async def reproject_to_crs(
-    src_tif: Path, dst_crs: rasterio.CRS, mem_limit: int = 0
-) -> Path:
-    if not is_valid_geotiff(src_tif):
-        raise ValueError(f"Source file {src_tif} is not a valid GeoTIFF")
+@retry(5)
+def reproject_to_crs(src_tif: Path, dst_crs: rasterio.CRS, mem_limit: int = 0) -> Path:
 
     with rasterio.open(src_tif) as src_dataset:
         if src_dataset.crs == dst_crs:
@@ -644,7 +650,7 @@ def convert_data_types(
     elevation_range = max_elevation - min_elevation
     if dest_tif.is_file():
         with rasterio.open(dest_tif) as dest:
-            if dest.meta["dtype"] == "uint16":
+            if dest.meta["dtype"] == rasterio.uint16:
                 logger.info(f"Skipping conversion for {src_tif}, already converted")
                 return dest_tif
 
@@ -724,46 +730,53 @@ async def main(
     async with aiofiles.open(src, "r") as src_file:
         urls = [line.strip() for line in (await src_file.readlines()) if line.strip()]
 
-    download_bar = tqdm.tqdm(desc="Downloading", total=len(urls))
+    async with httpx.AsyncClient() as client:
+        async with asyncio.TaskGroup() as tg:
+            tasks = [tg.create_task(client.head(url)) for url in urls]
+        download_sizes = [
+            int(task.result().headers["Content-Length"]) for task in tasks
+        ]
 
-    async def download_and_reproject(url: str) -> Path:
-        # nonlocal current_memory_usage
-        reprojected_file = None
-        for i in range(5):
-            try:
-                await limiter.wait()
-                downloaded_file = await download(url, downloads_dir, memory_manager)
-            except Exception as e:
-                logger.warning(f"Error downloading {url}: {e!r}. Retrying ({i+1}/5)...")
-                continue
-            try:
-                reprojected_file = await reproject_to_crs(
-                    downloaded_file, crs, mem_limit
-                )
-            except Exception as e:
-                downloaded_file.unlink(missing_ok=True)
-                logger.warning(
-                    f"Error reprojecting {downloaded_file}: {e!r}. Retrying ({i+1}/5)..."
-                )
-            if reprojected_file is not None:
-                download_bar.update()
-                return reprojected_file
+    download_bar = tqdm.tqdm(
+        desc="Downloading files",
+        total=sum(download_sizes),
+        unit="B",
+        unit_scale=True,
+        unit_divisor=1024,
+    )
 
-        raise RuntimeError(f"Failed to download and reproject {url} after 5 attempts")
+    async def download_and_reproject(url: str, expected_size: int) -> Path:
+        dest_path = downloads_dir / url.split("/")[-1]
+        # if dest_path.is_file() and is_valid_geotiff(dest_path):
+        if dest_path.is_file():
+            logger.info(f"Skipping {url}, already downloaded")
+            downloaded_file = dest_path
+        else:
+            downloaded_file = await download(url, dest_path, memory_manager)
+
+        reprojected_file = reproject_to_crs(downloaded_file, crs, mem_limit)
+        download_bar.update(expected_size)
+        return reprojected_file
 
     # Download all the files
     with download_bar:
-        async with asyncio.TaskGroup() as tg:
+        download_tasks: list[asyncio.Task[Path]] = []
+        async with asyncio.TaskGroup() as download_tg:
             downloads_dir = dst / "downloads"
             downloads_dir.mkdir(parents=True, exist_ok=True)
-            results = [tg.create_task(download_and_reproject(url)) for url in urls]
+            for url, size in zip(urls, download_sizes):
+                logger.debug(f"Scheduling download and reprojection for {url}")
+                download_tasks.append(
+                    download_tg.create_task(download_and_reproject(url, size))
+                )
 
         # Build a VRT from all the reprojected files
-        reprojected_tifs = [task.result() for task in results]
+        reprojected_tifs = [task.result() for task in download_tasks]
     converted_tifs = [
         convert_data_types(tif, elevation_min, elevation_max)
         for tif in tqdm.tqdm(reprojected_tifs, desc="Converting")
     ]
+    merged_tif = dst / "merged.tif"
     merge_with_progress(
         converted_tifs,
         dst_path=output,
