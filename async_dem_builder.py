@@ -705,6 +705,29 @@ class RateLimiter:
         # otherwise, increment the burst count
 
 
+def iter_raster_rows(raster: rasterio.DatasetReader, mem_limit: int):
+    logger.debug(
+        f"Output file {raster.name} has bounds {raster.bounds}, CRS {raster.crs}, and resolution {raster.res}"
+    )
+    max_pixels = (
+        mem_limit * 1.0e6 / (np.dtype(raster.meta["dtype"]).itemsize * raster.count)
+    )
+    if max_pixels < raster.width:
+        raise ValueError(
+            f"Memory limit of {mem_limit} MB is too low to process the merged file. "
+            f"Increase the memory limit to at least {raster.width * raster.meta['dtype'].itemsize * raster.count / 1e6:.2f} MB."
+        )
+    for chunk in subdivide(
+        windows.Window(0, 0, raster.width, raster.height),
+        int(max_pixels // raster.width),
+        raster.width,
+    ):
+        data = raster.read(1, window=chunk)
+        logger.warning(f"{type(data)=}, {data.shape=}, {chunk=} {raster.width=}")
+        for row in data:
+            yield row
+
+
 async def main(
     src: Path,
     dst: Path,
@@ -779,10 +802,31 @@ async def main(
     merged_tif = dst / "merged.tif"
     merge_with_progress(
         converted_tifs,
-        dst_path=output,
+        dst_path=merged_tif,
         mem_limit=mem_limit,
     )
-    logger.info(f"Saved merged output to {output}")
+    logger.info(f"Saved merged output to {merged_tif}")
+    with rasterio.open(merged_tif) as merged:
+        # TODO: clip the raster so that it's size is a multiple of 700m
+        # TODO: downsample the raster by 3.5, since CSL2 uses a scale factor of 3.5 m/px
+        # while the source data is at 1 m/px.
+        # This will also reduce the final file's size by a factor of 12.25
+
+        png_writer = png.Writer(
+            width=merged.width,
+            height=merged.height,
+            bitdepth=np.dtype(merged.meta["dtype"]).itemsize * 8,
+            greyscale=True,
+        )
+        with output.open("wb") as output_file:
+            png_writer.write(
+                output_file,
+                tqdm.tqdm(
+                    iter_raster_rows(merged, mem_limit),
+                    desc="Writing PNG",
+                    total=merged.height,
+                ),
+            )
 
 
 if __name__ == "__main__":
