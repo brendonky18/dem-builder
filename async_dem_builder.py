@@ -319,9 +319,23 @@ def merge_with_progress(
             logger.debug("Set nodataval to 0")
             nodataval = 0
 
+        # Round the width and height to the nearest multiple of 700
+        output_width = round(output_width / 700) * 700
+        output_height = round(output_height / 700) * 700
+
+        center_x = round((output_width) / 2)
+        center_y = round((output_height) / 2)
+        x_offset = round(output_width / 2)
+        y_offset = round(output_height / 2)
+
         # When dataset output is selected, we might need to create one
         # and will also provide the option of merging by chunks.
-        dout_window = windows.Window(0, 0, output_width, output_height)
+        dout_window = windows.Window(
+            center_x - x_offset,
+            center_y - y_offset,
+            center_x + x_offset,
+            center_y + y_offset,
+        )
         if dst_path is not None:
             if isinstance(dst_path, DatasetWriter):
                 dst = dst_path
