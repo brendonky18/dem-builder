@@ -159,12 +159,6 @@ def merge_with_progress(
         When sources cannot be merged due to incompatibility between
         them or limitations of the tool.
     """
-    if precision is not None:
-        warnings.warn(
-            "The precision parameter is unused, deprecated, and will be removed in 2.0.0.",
-            RasterioDeprecationWarning,
-        )
-
     if method in rasterio.merge.MERGE_METHODS:
         copyto = rasterio.merge.MERGE_METHODS[method]
     elif callable(method):
