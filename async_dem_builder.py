@@ -478,7 +478,7 @@ def is_valid_geotiff(file: Path, crs: rasterio.CRS | None = None) -> bool:
             for i in r.indexes:
                 r.checksum(i)
     except rasterio.errors.RasterioError as e:
-        logger.warning(f"Error validating {file}: {e}")
+        logger.warning(f"Error validating {file}", exc_info=e)
         return False
     else:
         logger.debug(f"Successfully validated {file}")
@@ -498,23 +498,36 @@ class MemoryManager(asyncio.Event):
             raise ValueError(
                 f"Requested memory size {size/1024**2:4.2f} MB exceeds maximum memory {self.max_memory/1024**3:4.2f} GB"
             )
+
+        if self.current_memory + size > self.max_memory:
+            logger.debug(
+                "Waiting for memory to be freed to acquire %0.2f MB for: %s",
+                size / 1024**2,
+                name,
+            )
         while self.current_memory + size > self.max_memory:
             await self.wait()
             self.clear()
         self.current_memory += size
+        logger.debug(
+            "Acquired %0.2f MB memory for: %s (current usage: %0.2f MB)",
+            size / 1024**2,
+            name,
+            self.current_memory / 1024**2,
+        )
 
         try:
             yield
         finally:
             self.current_memory -= size
             self.set()
+            logger.debug(
+                "Released %0.2f MB memory for: %s (current usage: %0.2f MB)",
+                size / 1024**2,
+                name,
+                self.current_memory / 1024**2,
+            )
 
-
-async def download(url: str, dest_dir: Path, memory_manager: MemoryManager) -> Path:
-    dest_path = dest_dir / url.split("/")[-1]
-    if dest_path.is_file() and is_valid_geotiff(dest_path):
-        logger.info(f"Skipping {url}, already downloaded")
-        return dest_path
 
     async with httpx.AsyncClient() as client, client.stream("GET", url) as response:
         response.raise_for_status()
@@ -540,14 +553,14 @@ async def reproject_to_crs(
 
     with rasterio.open(src_tif) as src_dataset:
         if src_dataset.crs == dst_crs:
-            logger.info(f"{src_tif} is already in {dst_crs}, skipping reprojection")
+            logger.debug(f"{src_tif} is already in {dst_crs}, skipping reprojection")
             return src_tif
 
         dest_dir = src_tif.parent.parent / str(dst_crs).replace(":", "-")
         dest_dir.mkdir(parents=True, exist_ok=True)
         reprojected_tif = dest_dir / (src_tif.name)
         if reprojected_tif.is_file() and is_valid_geotiff(reprojected_tif, dst_crs):
-            logger.info(f"Skipping reprojection for {src_tif}, already reprojected")
+            logger.debug(f"Skipping reprojection for {src_tif}, already reprojected")
             return reprojected_tif
 
         transform, width, height = rasterio.warp.calculate_default_transform(
@@ -635,7 +648,7 @@ class RateLimiter:
         else:
             sleep_time = (self._next_reset - time.perf_counter_ns()) / 1e9
             if sleep_time > 0:
-                logger.info(
+                logger.debug(
                     f"Rate limit reached, sleeping for {sleep_time:.2f} seconds"
                 )
                 await asyncio.sleep(sleep_time)
