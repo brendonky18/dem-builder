@@ -529,6 +529,45 @@ class MemoryManager(asyncio.Event):
             )
 
 
+class retry:
+    def __init__(self, n: int) -> None:
+        self.n = n
+
+    def __call__[**P, R](self, fn: Callable[P, R]) -> Callable[P, R]:
+        if asyncio.iscoroutinefunction(fn):
+
+            async def awrapper(*args, **kwargs):
+                for i in range(self.n):
+                    try:
+                        return await fn(*args, **kwargs)
+                    except Exception as e:
+                        logger.warning(
+                            f"Error while running {fn.__name__}. Retrying ({i+1}/{self.n})...",
+                            exc_info=e,
+                        )
+                raise RuntimeError(
+                    f"Failed to run {fn.__name__} after {self.n} attempts"
+                )
+
+            return awrapper  # type: ignore
+        else:
+
+            def wrapper(*args, **kwargs):
+                for i in range(self.n):
+                    try:
+                        return fn(*args, **kwargs)
+                    except Exception as e:
+                        logger.warning(
+                            f"Error while running {fn.__name__}. Retrying ({i+1}/{self.n})...",
+                            exc_info=e,
+                        )
+                raise RuntimeError(
+                    f"Failed to run {fn.__name__} after {self.n} attempts"
+                )
+
+            return wrapper
+
+
     async with httpx.AsyncClient() as client, client.stream("GET", url) as response:
         response.raise_for_status()
         download_size = int(response.headers["content-length"])
